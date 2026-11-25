@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <AssemblyName>NanoCadMcp.Selection</AssemblyName>
+    <Version>1.1.0</Version>
+    <AssemblyName Condition="'$(BuildMcpServerModule)' == 'true'">NanoCadMcp.Tools26</AssemblyName>
+    <Version Condition="'$(BuildMcpServerModule)' == 'true'">1.2.0</Version>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <NanoCadReferences Condition="'$(NanoCadReferences)' == '' and '$(NCadSDK)' != ''">$(NCadSDK)\include-x64</NanoCadReferences>
+    <NanoCadReferences Condition="'$(NanoCadReferences)' == ''">$(ProgramW6432)\Nanosoft\nanoCAD x64 26.0\bin</NanoCadReferences>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="SelectionCommands.cs" Condition="'$(BuildMcpServerModule)' == 'true'" />
+    <Compile Remove="ServerCommands.cs" Condition="'$(BuildMcpServerModule)' != 'true'" />
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+    <Reference Include="hostmgd;hostdbmgd;nrxgatemgd">
+      <HintPath>$(NanoCadReferences)\%(Identity).dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+**/__pycache__/
+*.pyc
+.venv/
+.vs/
+*.user
+*.dwg
+*.dxf
+*.dwl*
+access-*.json
+toggle*.log
+toggle-*.txt
