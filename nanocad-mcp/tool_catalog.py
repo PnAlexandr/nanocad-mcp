@@ -19,6 +19,8 @@ BASE = {
     "Чертёж и измерения": "status use_instance drawing_summary get_selection measure_selection query get_texts get_blocks measure styles audit_underlay",
     "Редактирование и оформление": "cleanup_underlay layers dim_chain dim_linear add_text edit_entities zoom",
     "Файлы": "documents backup save",
+    "Электро": "electro_project_manager electro_object_properties",
+    "GeoniCS · вертикальная планировка": "geonics_slope_marker geonics_inspect_relief",
     "Выполнение кода": "run_lisp exec_python",
 }
 GROUPS = {

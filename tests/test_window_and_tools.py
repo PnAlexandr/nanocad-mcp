@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from pathlib import Path
 import sys
@@ -35,6 +36,57 @@ class WindowTests(unittest.TestCase):
 
 
 class ToolTests(unittest.TestCase):
+    def test_specialty_preview_requires_a_registered_command_and_binds_execution(self):
+        async def inline(fn, **kwargs):
+            return fn()
+
+        doc = Mock(FullName=r"C:\CAD\copy.dwg")
+        doc.GetVariable.return_value = 2
+        with patch.object(server, "_run", side_effect=inline), patch.object(server, "_doc", return_value=doc), \
+             patch.object(server, "_app", return_value=Mock(Version="26.0")), \
+             patch.object(server, "_lisp", return_value="1") as probe, \
+             patch.object(server, "enabled_session", return_value=server.S.access), \
+             patch.object(server, "_selection_request", return_value={"state": "queued"}) as dispatch:
+            for button, command in [(server.electro_project_manager, "CW_PROJECT"),
+                                    (server.electro_object_properties, "CW_SHOW_PROPERTIES"),
+                                    (server.geonics_slope_marker, "GcSfRedPntGradeMarker")]:
+                preview = asyncio.run(button())
+                self.assertEqual(preview["command"], command)
+                self.assertTrue(preview["dry_run"])
+                with self.assertRaises(ValueError):
+                    asyncio.run(button("other.dwg", False))
+                self.assertEqual(asyncio.run(button(preview["document"], False))["state"], "queued")
+                token = base64.b64encode(doc.FullName.encode("utf-8")).decode("ascii")
+                dispatch.assert_called_with(f'(NCMCP_QUEUE_SPECIALTY "{command}" "{token}")',
+                                            expected_document=doc.FullName)
+            dispatch.reset_mock()
+            probe.return_value = "2"
+            self.assertEqual(asyncio.run(server.geonics_slope_marker())["detected_by"], "loaded_GcSrfEngine")
+            self.assertIn("GCSRFENGINE", probe.call_args.args[1])
+            probe.return_value = "0"
+            self.assertFalse(asyncio.run(server.electro_object_properties(doc.FullName, False))["ok"])
+            self.assertNotIn("GCSRFENGINE", probe.call_args.args[1])
+            self.assertFalse(asyncio.run(server.geonics_slope_marker(doc.FullName, False))["ok"])
+            dispatch.assert_not_called()
+
+    def test_relief_distinguishes_a_label_from_unlabelled_geometry_and_limits_to_selection(self):
+        async def inline(fn, **kwargs):
+            return fn()
+
+        def record(handle, kind, layer, label=""):
+            return dict(h=handle, t=kind, layer=layer, eff="", text=label, attrs=[])
+
+        records = [record("A", "GCDBBREAKLINE", "Surface"), record("B", "TEXT", "0", "Бровка оврага")]
+        with patch.object(server, "_run", side_effect=inline), patch.object(server, "_doc"), \
+             patch.object(server, "_scan", return_value={"recs": records}), \
+             patch.object(server, "_brief", side_effect=lambda r: {"handle": r["h"]}):
+            subset = asyncio.run(server.geonics_inspect_relief(["a", "FF"]))
+            self.assertEqual(subset["unknown_handles"], ["FF"])
+            self.assertEqual(subset["label_matches"], 0)
+            self.assertEqual(subset["by_type"], {"GCDBBREAKLINE": 1})
+            self.assertEqual(asyncio.run(server.geonics_inspect_relief())["labels"][0]["handle"], "B")
+            self.assertEqual(asyncio.run(server.geonics_inspect_relief([]))["by_type"], {})
+
     def test_ribbon_packs_are_independent_and_restore_a_custom_selection(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(catalog, "SETTINGS", Path(tmp) / "tools.json"):
             # A profile created by the original 0.6 settings dialog.

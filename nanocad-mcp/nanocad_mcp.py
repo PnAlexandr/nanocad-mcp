@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import concurrent.futures
 import contextlib
 import datetime as _dt
@@ -49,7 +50,7 @@ logging.basicConfig(stream=sys.stderr, level=logging.INFO,
                     format="%(asctime)s nanocad-mcp %(levelname)s %(message)s")
 log = logging.getLogger("nanocad-mcp")
 
-__version__ = "0.6.0"
+__version__ = "0.7.9"
 
 mcp = ConfigurableMCP(
     "nanocad-mcp",
@@ -1311,11 +1312,13 @@ _SELECTION_LISP = r'''
 '''
 
 
-def _selection_request(expression: str) -> dict:
+def _selection_request(expression: str, expected_document: str | None = None) -> dict:
     doc = _doc()
     if str(_app().Version).split(".")[0] != "26":
         raise RuntimeError("Для команд чтения выделения нужен nanoCAD 26.")
     document = os.path.normcase(_doc_key(doc))
+    if expected_document and document != os.path.normcase(expected_document):
+        raise Busy("Сменился активный чертёж. Повторите предварительный просмотр.")
     body = _SELECTION_LISP.replace("<<EXPRESSION>>", expression)
     text = _lisp(doc, body)
     if text.startswith("LOAD_MODULE"):
@@ -1389,6 +1392,105 @@ async def _call_extra(name, arguments):
 
 
 mcp.call_extra = _call_extra
+
+
+async def _specialty_button(command, title, document, dry_run):
+    def go():
+        doc = _doc()
+        target = _doc_key(doc)
+        if not dry_run and (not document or os.path.normcase(document) != os.path.normcase(target)):
+            raise ValueError("Укажите document из предварительного просмотра в активном чертеже.")
+        if str(_app().Version).split(".")[0] != "26":
+            raise ValueError("Для этой команды нужен nanoCAD 26.")
+        registered = f'(or (getcname "_{command}") (getcname "{command}"))'
+        probe = f'(if {registered} 1 0)'
+        if command == "GcSfRedPntGradeMarker":
+            # GeoniCS 26 handles the command in GcSrfEngine even when getcname returns nil.
+            module = '(member "GCSRFENGINE" (mapcar \'(lambda (m) (strcase (vl-filename-base m))) (arx)))'
+            probe = f'(cond ({registered} 1) ({module} 2) (T 0))'
+        source = _lisp(doc, LISP_EVAL.replace("<<CODE>>", probe)).strip()
+        if source not in ("1", "2"):
+            return {"ok": False, "document": target, "command": command,
+                    "error": "Команда отсутствует в разрешённом окне. Проверьте, где загружен профильный модуль."}
+        if dry_run:
+            return {"ok": True, "dry_run": True, "document": target, "command": command, "action": title,
+                    "detected_by": "loaded_GcSrfEngine" if source == "2" else "getcname"}
+        if enabled_session() != S.access:
+            raise Busy("Сменилось разрешённое окно nanoCAD.")
+        if command == "GcSfRedPntGradeMarker" and int(doc.GetVariable("CVPORT")) == 1:
+            return {"ok": False, "document": target, "error": "Перейдите в модель или активируйте видовой экран с опорными точками."}
+        S.scan_cache = None
+        # The LISP transport is ANSI. Pass the exact Unicode document name to the native check.
+        encoded_target = base64.b64encode(target.encode("utf-8")).decode("ascii")
+        return _selection_request(f'(NCMCP_QUEUE_SPECIALTY "{command}" "{encoded_target}")',
+                                  expected_document=target)
+
+    return await _run(go, readonly=dry_run, job=_jobkey(command, document=document, preview=dry_run))
+
+
+@mcp.tool()
+async def electro_project_manager(document: str | None = None, dry_run: bool = True) -> dict:
+    """Открыть менеджер проекта nanoCAD Электро. После просмотра передайте document и dry_run=False."""
+    return await _specialty_button("CW_PROJECT", "Открыть менеджер проекта Электро", document, dry_run)
+
+
+@mcp.tool()
+async def electro_object_properties(document: str | None = None, dry_run: bool = True) -> dict:
+    """Открыть штатную страницу свойств в Электро. Выбор объекта выполняется в CAD.
+    После просмотра передайте document и dry_run=False."""
+    return await _specialty_button("CW_SHOW_PROPERTIES", "Открыть свойства объекта Электро", document, dry_run)
+
+
+@mcp.tool()
+async def geonics_slope_marker(document: str | None = None, dry_run: bool = True) -> dict:
+    """Поставить уклоноуказатель GeoniCS. После просмотра передайте document и dry_run=False.
+    Для работы нужен открытый проект GeoniCS. Укажите две опорные точки в CAD.
+    queued означает только передачу команды в окно."""
+    return await _specialty_button("GcSfRedPntGradeMarker", "Указать две опорные точки GeoniCS",
+                                   document, dry_run)
+
+
+@mcp.tool()
+async def geonics_inspect_relief(handles: list[str] | None = None, limit: int = 20) -> dict:
+    """Осмотреть рельеф и признаки оврага в модели. Считает опорные точки, структурные линии,
+    указатели уклонов, грани поверхности и ищет явные обозначения оврага, бровки, тальвега.
+    Передайте handles из выделения, чтобы ограничить проверку. Возвращает примеры и слои."""
+    if not 1 <= limit <= 100:
+        return {"ok": False, "error": "limit должен быть от 1 до 100."}
+    def go():
+        doc = _doc()
+        records = _scan(doc, use_cache=False)["recs"]
+        wanted = None if handles is None else {h.upper() for h in handles}
+        types = Counter()
+        layers = Counter()
+        examples = []
+        labels = []
+        label_count = 0
+        found = set()
+        for r in records:
+            if wanted is not None and r["h"].upper() not in wanted:
+                continue
+            if wanted is not None:
+                found.add(r["h"].upper())
+            sources = [r["layer"], r["eff"], clean_mtext(r["text"]), *(v for _, v in r["attrs"])]
+            matches = [s for s in sources if any(w in s.casefold() for w in ("овраг", "тальвег", "бровк"))]
+            if matches:
+                label_count += 1
+                if len(labels) < limit:
+                    labels.append({"handle": r["h"], "layer": r["layer"], "label": matches[0][:240]})
+            terrain_layer = any(w in r["layer"].casefold() for w in ("откос", "рельеф", "горизонтал", "гидрограф", "отметк"))
+            if not (terrain_layer or matches or r["t"] in {"GCDBREDPOINT", "GCDBBREAKLINE", "GCDBGRADEMARKER",
+                                                          "GCDBBOUNDARY", "GCDBCONTOURPREVIEW", "3DFACE"}):
+                continue
+            types[r["t"]] += 1
+            layers[r["layer"]] += 1
+            if len(examples) < limit:
+                examples.append(_brief(r))
+        return {"ok": True, "document": _doc_key(doc), "by_type": dict(types), "by_layer": dict(layers),
+                "examples": examples, "label_matches": label_count, "labels": labels,
+                "unknown_handles": sorted((wanted or set()) - found),
+                "note": "Подписи и названия слоёв указывают кандидатов. Геометрию дна и бровок подтверждают по месту."}
+    return await _run(go, readonly=True, job=_jobkey("geonics_inspect_relief", handles=handles, limit=limit))
 
 
 @mcp.tool()

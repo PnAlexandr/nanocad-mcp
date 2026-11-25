@@ -4,7 +4,7 @@
     <AssemblyName>NanoCadMcp.Selection</AssemblyName>
     <Version>1.1.0</Version>
     <AssemblyName Condition="'$(BuildMcpServerModule)' == 'true'">NanoCadMcp.Tools26</AssemblyName>
-    <Version Condition="'$(BuildMcpServerModule)' == 'true'">1.2.0</Version>
+    <Version Condition="'$(BuildMcpServerModule)' == 'true'">1.3.0</Version>
     <PlatformTarget>x64</PlatformTarget>
     <Nullable>enable</Nullable>
     <NanoCadReferences Condition="'$(NanoCadReferences)' == '' and '$(NCadSDK)' != ''">$(NCadSDK)\include-x64</NanoCadReferences>
