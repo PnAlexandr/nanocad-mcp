@@ -11,8 +11,12 @@ if (Get-Process -Name 'ncad*','nmc*' -ErrorAction SilentlyContinue) {
 $dest = Join-Path $env:LOCALAPPDATA 'nanoCAD-MCP'
 $python = Join-Path $dest '.venv\Scripts\python.exe'
 $server = Join-Path $dest 'nanocad_mcp.py'
-$files = 'nanocad_mcp.py','cad_access.py','cad_toggle.lsp','control.ps1','NanoCAD-MCP.cfg','NanoCAD-MCP.cuix','NanoCAD-MCP.ico','NanoCadMcp.Tools26.dll'
+$files = 'nanocad_mcp.py','cad_access.py','cad_toggle.lsp','control.ps1','NanoCAD-MCP.cfg','NanoCAD-MCP.cuix','NanoCAD-MCP.ico','NanoCadMcp.Tools26.dll','NanoCadMcp.Window26.dll','NanoCadMcp.Extras26.dll','extra_commands.py','tool_catalog.py'
+$files += 'NanoCAD-MCP-Extras.ico','NanoCAD-MCP-3D.ico'
 foreach ($file in $files) {
+    if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot $file) -PathType Leaf)) { throw "В комплекте отсутствует $file." }
+}
+foreach ($file in 'evans/LICENSE','evans/NOTICE','evans/routes.py','evans/infrastructure/http_bridge.py') {
     if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot $file) -PathType Leaf)) { throw "В комплекте отсутствует $file." }
 }
 
@@ -58,9 +62,10 @@ if (!(Test-Path -LiteralPath $python)) {
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось подготовить Python 3.12.' }
 }
 if (!(Test-Path -LiteralPath (Join-Path $dest '.venv\Scripts\pythonw.exe'))) { throw 'В окружении Python отсутствует pythonw.exe.' }
-& $uv pip install --python $python 'mcp>=1.10,<2' pywin32
+& $uv pip install --python $python 'mcp>=1.10,<2' 'jsonschema>=4,<5' pywin32
 if ($LASTEXITCODE -ne 0) { throw 'Не удалось установить библиотеки Python.' }
 foreach ($file in $files) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $dest -Force }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'evans') -Destination $dest -Recurse -Force
 
 $mode = if ($clients.Claude) { '--install' } else { '--install-ui' }
 & $python $server $mode

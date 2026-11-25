@@ -41,7 +41,7 @@ import win32com.client
 import win32event
 import win32process
 from win32com.client import VARIANT
-from mcp.server.fastmcp import FastMCP
+from tool_catalog import ConfigurableMCP, COMMAND_GROUP, current_tool, enabled_tools, require_enabled
 
 from cad_access import enabled_session
 
@@ -49,16 +49,16 @@ logging.basicConfig(stream=sys.stderr, level=logging.INFO,
                     format="%(asctime)s nanocad-mcp %(levelname)s %(message)s")
 log = logging.getLogger("nanocad-mcp")
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
-mcp = FastMCP(
+mcp = ConfigurableMCP(
     "nanocad-mcp",
     instructions=(
         "Управление nanoCAD (24–26, СПДС). Перед правкой проанализируй чертёж "
         "и покажи пользователю план (dry_run=True, где поддерживается). "
         "Дождись подтверждения перед изменением, сохранением или выполнением кода. "
         "Если ответ «still_running» — повтори тот же вызов с теми же аргументами. "
-        "Для нестандартных задач есть run_lisp и exec_python."
+        "Пользователь выбирает доступные команды в настройках nanoCAD MCP."
     ),
 )
 
@@ -114,6 +114,7 @@ async def _run(fn, *args, readonly: bool = False, job: str | None = None, **kwar
     global _job_session
 
     access = enabled_session()
+    requested_tool = current_tool.get()
     if access is None:
         return {"ok": False, "error": _DISABLED}
 
@@ -132,6 +133,8 @@ async def _run(fn, *args, readonly: bool = False, job: str | None = None, **kwar
                 for i in range(attempts):
                     if enabled_session() != access:
                         return {"ok": False, "error": _DISABLED}
+                    if requested_tool:
+                        require_enabled(requested_tool)
                     if S.access != access:
                         S.access = access
                         S.app = S.scan_cache = None
@@ -225,6 +228,17 @@ def _find_instances() -> list[tuple[str, object]]:
     try:
         ctx = pythoncom.CreateBindCtx(0)
         rot = pythoncom.GetRunningObjectTable()
+        # Product variants can publish the same CLSID. The SDK button registers
+        # the actual in-process Application under a second, process-specific name.
+        if S.access:
+            try:
+                name = pythoncom.CreateItemMoniker("!", f"NanoCAD-MCP.Window.{S.access[0]}")
+                obj = rot.GetObject(name).QueryInterface(pythoncom.IID_IDispatch)
+                app = win32com.client.Dispatch(obj)
+                if _enabled_app(app):
+                    return [("nanoCAD.Application", app)]
+            except pythoncom.com_error:
+                pass  # Older installations only publish the standard CLSID.
         enum = rot.EnumRunning()
         while True:
             mks = enum.Next(1)
@@ -268,6 +282,7 @@ def _describe(prog, app) -> dict:
     doc = _safe(lambda: app.ActiveDocument)
     return {
         "prog_id": prog,
+        "process_id": win32process.GetWindowThreadProcessId(int(app.HWND))[1],
         "version": _safe(lambda: str(app.Version)),
         "caption": _safe(lambda: str(app.Caption)),
         "active_document": _safe(lambda: str(doc.Name)) if doc else None,
@@ -893,7 +908,9 @@ async def status() -> dict:
         inst = _find_instances()
         if not inst:
             return {"ok": False, "server_version": __version__,
-                    "error": "nanoCAD не найден. Запустите nanoCAD (не от администратора) и откройте чертёж."}
+                    "process_id": S.access[0],
+                    "error": "Доступ включён, но COM-объект выбранного окна недоступен. "
+                             "Проверьте сообщение кнопки MCP в этом окне."}
         app = _app()
         doc = _safe(lambda: app.ActiveDocument)
         info = {"ok": True, "server_version": __version__,
@@ -1318,6 +1335,60 @@ def _selection_request(expression: str) -> dict:
     if data.get("ok") and os.path.normcase(data["document"]) != document:
         raise Busy("При чтении сменился активный чертёж. Повторите запрос.")
     return data
+
+
+_EXTRA_LISP = r'''
+(defun mcp-main (fn / f)
+  (setq f (open fn "w"))
+  (if (getcname "_NCMCPExtrasInfo")
+    (write-line (NCMCP_EXTRA (strcat fn ".ops")) f)
+    (write-line "LOAD_MODULE" f))
+  (close f))
+'''
+
+
+async def _call_extra(name, arguments):
+    from extra_commands import invoke
+
+    def go():
+        app = _app()
+        if str(app.Version).split(".")[0] != "26":
+            raise ValueError("Дополнительные команды используют SDK nanoCAD 26")
+        doc = _doc()
+        document = _doc_key(doc)
+
+        def check_target():
+            require_enabled(name)
+            if enabled_session() != S.access or _doc_key(_doc()) != document:
+                raise Busy("Изменилось разрешение или активный чертёж")
+
+        def request(method, path, body):
+            check_target()
+            payload = json.dumps({"Pid": S.access[0], "Document": document, "Method": method,
+                                  "Path": path, "Body": body or {}}, ensure_ascii=True, allow_nan=False)
+            response = _lisp(doc, _EXTRA_LISP, ops=[payload])
+            if response.strip() == "LOAD_MODULE":
+                check_target()
+                dll = Path(__file__).with_name("NanoCadMcp.Extras26.dll").resolve(strict=True)
+                doc.SendCommand(f'_-NETLOAD\n"{dll}"\n')
+                check_target()
+                response = _lisp(doc, _EXTRA_LISP, ops=[payload])
+            if response.strip() == "LOAD_MODULE":
+                raise RuntimeError("Не удалось загрузить NanoCadMcp.Extras26.dll")
+            data = json.loads(response)
+            if isinstance(data, dict) and (data.get("error") or data.get("success") is False):
+                raise ValueError(data.get("error") or "Команда nanoCAD завершилась ошибкой")
+            return data
+
+        try:
+            return invoke(name, arguments, request, (S.access, document), check_target)
+        finally:
+            S.scan_cache = None
+
+    return await _run(go, job=_jobkey(name, args=arguments))
+
+
+mcp.call_extra = _call_extra
 
 
 @mcp.tool()
@@ -1824,7 +1895,8 @@ def install_cad_ui():
     profile_name = re.compile(r"\bnanoCAD\b.*\b(?:24|25|26)(?:[.\s]|$)", re.IGNORECASE)
     profiles = sorted(p for p in root.glob("*") if profile_name.search(p.name))
     source = Path(__file__).resolve().parent
-    files = ("NanoCAD-MCP.cfg", "NanoCAD-MCP.cuix", "NanoCAD-MCP.ico")
+    files = ("NanoCAD-MCP.cfg", "NanoCAD-MCP.cuix", "NanoCAD-MCP.ico",
+             "NanoCAD-MCP-Extras.ico", "NanoCAD-MCP-3D.ico")
     include = '#include "NanoCAD-MCP.cfg"'
     installed = 0
 
@@ -1900,6 +1972,11 @@ def install_config():
 
 
 def main():
+    if "--tool-catalog" in sys.argv:
+        enabled = enabled_tools()
+        print(json.dumps([{"name": n, "group": g, "enabled": n in enabled}
+                          for n, g in COMMAND_GROUP.items()], ensure_ascii=True))
+        return
     if "--install-ui" in sys.argv:
         sys.exit(install_cad_ui())
     if "--install" in sys.argv:

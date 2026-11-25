@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <AssemblyName>NanoCadMcp.Extras26</AssemblyName>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+    <NanoCadReferences Condition="'$(NCadSDK)' != ''">$(NCadSDK)\include-x64</NanoCadReferences>
+    <NanoCadReferences Condition="'$(NanoCadReferences)' == ''">$(ProgramW6432)\Nanosoft\nanoCAD x64 26.0\bin</NanoCadReferences>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="hostmgd;hostdbmgd;mapimgd;mapinet;imapimgd;mapibasetypes;mapibasetypes2">
+      <HintPath>$(NanoCadReferences)\%(Identity).dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="M3D">
+      <HintPath>$(ProgramW6432)\Nanosoft\nanoCAD x64 26.0\bin_nPlat\M3D.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

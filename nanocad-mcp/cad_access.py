@@ -15,7 +15,6 @@ import pywintypes
 import win32api
 import win32con
 import win32event
-import win32gui
 import win32process
 import win32ts
 
@@ -150,18 +149,12 @@ def _is_nanocad(image: str) -> bool:
     return image == "nmc.exe" or "ncad" in image or "nanocad" in image
 
 
-def _foreground_process() -> int | None:
-    try:
-        return win32process.GetWindowThreadProcessId(win32gui.GetForegroundWindow())[1]
-    except pywintypes.error:
-        return None
-
-
 def _calling_nanocad(table: dict[int, tuple[int, str]], pid: int) -> tuple[int | None, str]:
     """Find the nanoCAD behind the button press and describe how it was found.
 
-    Normally it is an ancestor of this process. Otherwise it is the only nanoCAD
-    in this session, or the one in the foreground, because it was just clicked."""
+    Normally it is an ancestor of this process. A single instance in the same
+    session is unambiguous. Focus can move during a click, so never use it to
+    choose between two eligible instances."""
     chain, seen = [], set()
     while pid in table and pid not in seen:
         seen.add(pid)
@@ -174,41 +167,51 @@ def _calling_nanocad(table: dict[int, tuple[int, str]], pid: int) -> tuple[int |
                if _is_nanocad(image) and _in_this_session(p)]
     if len(running) == 1:
         return running[0], f"only one running, chain {chain}"
-    front = _foreground_process()
-    front_image = table[front][1] if front in table else "?"
-    detail = f"foreground {front_image}, running {running}, chain {chain}"
-    return (front if front in running else None), detail
+    return None, f"running {running}, chain {chain}"
 
 
-def _answer(nonce: str, code: int, detail: str) -> None:
+def _has_window_module(pid: int) -> bool:
+    process = win32api.OpenProcess(0x410, False, pid)
+    try:
+        exe = win32process.GetModuleFileNameEx(process, 0)
+    finally:
+        process.Close()
+    return win32api.GetFileVersionInfo(exe, "\\")["FileVersionMS"] >> 16 == 26
+
+
+def _answer(nonce: str, code: int, detail: str, native: bool) -> None:
     with contextlib.suppress(OSError), (_HERE / "toggle.log").open("a", encoding="utf-8") as trace:
         trace.write(f"helper: {code} {detail}\n")
-    for old in _HERE.glob("toggle-result-*.txt"):
-        with contextlib.suppress(OSError):
-            old.unlink()
     result = _HERE / f"toggle-result-{nonce}.txt"
     pending = result.with_suffix(".tmp")
-    pending.write_text(f"{code}\n", encoding="ascii")
+    pending.write_text(f"{code}{'-26' if native else ''}\n", encoding="ascii")
     pending.replace(result)
 
 
-def press_button() -> int:
+def press_button(nonce: str | None = None) -> int:
     """Handle a press of the nanoCAD button and report back to cad_toggle.lsp."""
-    nonce = (_HERE / "toggle-request.txt").read_text(encoding="ascii").strip()
-    if not re.fullmatch(r"[0-9.,]{1,40}", nonce):
+    legacy = nonce is None
+    if legacy:
+        nonce = (_HERE / "toggle-request.txt").read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"[A-Za-z0-9.,_-]{1,80}", nonce):
         raise ValueError("Bad toggle request")
+    native = False
     try:
         pid, how = _calling_nanocad(_process_table(), os.getpid())
+        if pid is not None and not legacy:
+            native = _has_window_module(pid)
         code = AMBIGUOUS if pid is None else ON if toggle_process(pid) else OFF
         detail = f"pid {pid}, {how}"
     except (ValueError, OSError, pywintypes.error) as ex:
         code, detail = FAILED, repr(ex)
-    _answer(nonce, code, detail)
+    _answer(nonce, code, detail, native and code in (ON, OFF))
     return code
 
 
 if __name__ == "__main__":
     try:
+        if sys.argv[1:2] == ["--button"]:
+            sys.exit(press_button(sys.argv[2]))
         if len(sys.argv) > 1:
             sys.exit(ON if toggle_window(int(sys.argv[1])) else OFF)
         sys.exit(press_button())
